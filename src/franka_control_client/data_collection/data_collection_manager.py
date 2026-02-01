@@ -124,7 +124,7 @@ class DataCollectionManager:
                     self._handle_keypress(key)
                 if self._state_machine.state == DataCollectionState.COLLECTING:
                     self.__collect_step()
-                    time.sleep(1)  # Adjust sleep time as needed
+                    # time.sleep(1)  # Adjust sleep time as needed
                 if self._state_machine.state == DataCollectionState.STOPPED:
                     self.__reset_to_waiting()
                 time.sleep(0.01)

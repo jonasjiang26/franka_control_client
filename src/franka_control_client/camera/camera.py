@@ -22,7 +22,7 @@ class CameraDevice(RemoteDevice):
 
     def __init__(self, camera_name: str, preview: bool) -> None:
         super().__init__(camera_name)
-        self.image_subscriber = LatestMsgSubscriber(f"{self._name}")
+        self.image_subscriber = LatestMsgSubscriber(f"{self._name}") #topic name is camera name
         self.preview = preview
 
     def get_image(self) -> Optional[np.ndarray]:
