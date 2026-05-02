@@ -50,6 +50,7 @@ class ImageDataWrapper(IRLDataWrapper):
     def capture_step(self) -> Optional[np.ndarray]:
         # Implement the logic to save image data from the camera device
         image_data = self.camera_device.get_image()
+        depth_data = self.camera_device.get_depth() 
         # check if image_data is None and data side shape
         if image_data is None:
             raise ValueError("No image data received from camera device.")
@@ -64,7 +65,7 @@ class ImageDataWrapper(IRLDataWrapper):
                 f"got {image_data.shape}"
             )
 
-        return image_data
+        return image_data, depth_data
 
     def discard(self) -> None:
         # Implement the logic to discard the captured image data if needed

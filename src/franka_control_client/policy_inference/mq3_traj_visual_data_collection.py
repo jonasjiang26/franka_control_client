@@ -119,7 +119,9 @@ class MQ3TrajVisualDataCollectionInference(LeRobotPolicyInference):
         #     self.last_timestamp = time.perf_counter()
         start_time = time.perf_counter()
         # Build observation from hardware
-        observation = self._build_observation()
+        images = self._build_images()
+
+        
 
         try:
             # Preprocess observation

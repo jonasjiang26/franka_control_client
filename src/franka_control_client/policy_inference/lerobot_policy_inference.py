@@ -471,11 +471,11 @@ class LeRobotPolicyInference(PolicyInferenceManager):
     def _build_images(self) -> Dict[str, Any]:
         images: Dict[str, Any] = {}
         for cam in self.cameras:
-            frame = cam.capture_step()
-            if frame is None:
+            rgb_image, depth_image = cam.capture_step()
+            if rgb_image is None:
                 continue
-            if isinstance(frame, np.ndarray):
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if isinstance(rgb_image, np.ndarray):
+                frame = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
                 #resize the image like dataset converter does, to match the policy's expected input shape
                 frame = cv2.resize(frame, (256, 256), interpolation=cv2.INTER_AREA)
                 # cv2.imshow(f"fed-in image - {cam.hw_name}", frame)
@@ -486,6 +486,7 @@ class LeRobotPolicyInference(PolicyInferenceManager):
                     "width": int(w),
                     "channels": int(c),
                     "rgb_data": frame.tobytes(),
+                    "depth_data": None if depth_image is None else depth_image.tobytes(),
                 }
             else:
                 images[cam.hw_name] = frame

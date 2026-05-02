@@ -52,6 +52,17 @@ class CameraDevice(RemoteDevice):
         if self.final_size is not None:
             image_array = cv2.resize(image_array, self.final_size)
         return image_array
+    
+    def get_depth(self) -> Optional[np.ndarray]:
+        """Get the latest depth data from the camera."""
+        frame: Optional[CameraFrame] = self.image_subscriber.get_latest()
+        if frame is None:
+            raise ValueError("No image data received from camera device.")
+        if frame["depth_data"] is None:
+            raise ValueError("No depth data available in the latest camera frame.")
+        depth_array = np.frombuffer(frame["depth_data"], dtype=np.uint16)
+        depth_array = depth_array.reshape((frame["height"], frame["width"]))
+        return depth_array
 
     def show_preview_rgb(self, img_mat: np.ndarray) -> None:
         """Show a preview of the RGB image frame using OpenCV.

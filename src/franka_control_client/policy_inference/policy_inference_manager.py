@@ -73,10 +73,12 @@ class PolicyInferenceManager(abc.ABC):
         # data_collectors: List[HardwareDataWrapper],
         task: str,
         fps: int = 50,
+        single_step: bool = False,
     ) -> None:
         # self.data_collectors = data_collectors
         self.task = task
         self.fps = fps
+        self.single_step = single_step
         self.last_timestamp = None
         self._ui_console = UIConsole()
         self._start_infering_event = VoidEvent()
@@ -157,6 +159,10 @@ class PolicyInferenceManager(abc.ABC):
                     ):
                         # curr_time = time.perf_counter()
                         self._infer_step()
+                        if self.single_step:
+                            self._state_machine.trigger(
+                                PolicyInferenceEvent.SAVE
+                            )
                         # end_time = time.perf_counter()
                         # elapsed = end_time - curr_time
                         # print(f"Inference step took {elapsed:.3f} seconds")
