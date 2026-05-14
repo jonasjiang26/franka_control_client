@@ -158,8 +158,8 @@ class PolicyInferenceManager(abc.ABC):
                         == PolicyInferenceState.INFERING
                     ):
                         # curr_time = time.perf_counter()
-                        self._infer_step()
-                        if self.single_step:
+                        infer_success = self._infer_step()
+                        if self.single_step and infer_success is not False:
                             self._state_machine.trigger(
                                 PolicyInferenceEvent.SAVE
                             )
@@ -203,7 +203,7 @@ class PolicyInferenceManager(abc.ABC):
             self._ui_console.update_hint("Exiting policy inference")
 
     @abc.abstractmethod
-    def _infer_step(self) -> None:
+    def _infer_step(self) -> Optional[bool]:
         raise NotImplementedError
 
     @abc.abstractmethod

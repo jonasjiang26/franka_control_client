@@ -31,9 +31,8 @@ if __name__ == "__main__":
         group_port=7725,
     )
 
-    # Checkpoint path from eval_config.yaml
-
-    task = "yellow banana"
+    #goal target to be grasped
+    goal_prompt = "sponge."
 
     follower = PandaRobotiq(
         "PandaRobotiq",
@@ -44,21 +43,14 @@ if __name__ == "__main__":
         follower.panda_arm, follower.robotiq_gripper, 500, 10, 0.05
     )
 
-    # Camera capture interval matches inference frequency (30 Hz = 0.033s)
-    static_cam = ImageDataWrapper(CameraDevice("static_cam", preview=False), hw_name="static_cam")
-    wrist_cam = ImageDataWrapper(CameraDevice("wrist_cam", preview=False), hw_name="wrist_cam")
-
     data_collectors: List[IRLDataWrapper] = []
-    data_collectors.append(static_cam)
-    data_collectors.append(wrist_cam)
-
     data_collectors.append(PandaArmDataWrapper(follower.panda_arm))
     data_collectors.append(RobotiqGripperDataWrapper(follower.robotiq_gripper))
 
     inference_manager = MotionPlannerInference(
         data_collectors=data_collectors,
         control_pair=control_pair,
-        task=task,
+        task=goal_prompt,
         cfg=None,  # No additional config needed for this inference type
         )
     

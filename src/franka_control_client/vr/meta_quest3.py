@@ -1,4 +1,3 @@
-from simpub import init_xr_node_manager, MetaQuest3
 from scipy.spatial.transform import Rotation as R
 from typing import List, Optional, TypedDict
 import numpy as np
