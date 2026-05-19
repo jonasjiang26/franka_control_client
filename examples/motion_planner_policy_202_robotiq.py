@@ -32,7 +32,7 @@ if __name__ == "__main__":
     )
 
     #goal target to be grasped
-    goal_prompt = "sponge."
+    goal_prompt = "eggplant."
 
     follower = PandaRobotiq(
         "PandaRobotiq",
