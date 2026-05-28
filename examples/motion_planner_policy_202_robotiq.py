@@ -32,7 +32,8 @@ if __name__ == "__main__":
     )
 
     #goal target to be grasped
-    goal_prompt = "eggplant."
+    goal_prompt = "toy carrot."
+    scene_prompt = "toy carrot. pan."
 
     follower = PandaRobotiq(
         "PandaRobotiq",
@@ -51,6 +52,7 @@ if __name__ == "__main__":
         data_collectors=data_collectors,
         control_pair=control_pair,
         task=goal_prompt,
+        scene=scene_prompt,
         cfg=None,  # No additional config needed for this inference type
         )
     

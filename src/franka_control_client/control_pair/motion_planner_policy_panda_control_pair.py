@@ -190,7 +190,7 @@ class PolicyMotionPlannerControlPair(PolicyPandaControlPair):
         gripper_cmd: float,
         blocking: bool = False,
     ) -> None:
-        gripper_cmd = 1 if float(gripper_cmd) >= 0.5 else 0
+        gripper_cmd = 1 if float(gripper_cmd) >= 0.5 else 0.2
         if (
             self._last_gripper_cmd is None
             or abs(gripper_cmd - self._last_gripper_cmd) > GRIPPER_DEADBAND
@@ -264,7 +264,7 @@ class PolicyMotionPlannerControlPair(PolicyPandaControlPair):
         
         # Gripper command
         gripper_cmd = float(action[-1])
-        gripper_cmd = 1 if gripper_cmd >= 0.5 else 0
+        gripper_cmd = 1 if gripper_cmd >= 0.5 else 0.2
         action[-1] = gripper_cmd
         if (
             self._last_gripper_cmd is None
