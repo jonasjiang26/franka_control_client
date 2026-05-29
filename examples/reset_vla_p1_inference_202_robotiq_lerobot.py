@@ -1,0 +1,95 @@
+from typing import List
+
+import pyzlc
+
+from franka_control_client.camera.camera import CameraDevice
+from franka_control_client.control_pair.cartesian_policy_panda_control_pair import (
+    PolicyPandaRobotiqDeltaCartesianControlPair,
+)
+
+from franka_control_client.franka_robot.panda_arm import RemotePandaArm
+from franka_control_client.franka_robot.panda_robotiq import PandaRobotiq
+from franka_control_client.data_collection.irl_wrapper import (
+    IRLDataWrapper,
+    ImageDataWrapper,
+    PandaArmDataWrapper,
+    RobotiqGripperDataWrapper,
+)
+from franka_control_client.policy_inference.lerobot_policy_inference import (
+    LeRobotPolicyInferenceConfig,
+)
+from franka_control_client.policy_inference.vla_reset_lerobot_inference import (
+    VLAResetLeRobotInference,
+)
+from franka_control_client.robotiq_gripper.robotiq_gripper import (
+    RemoteRobotiqGripper,
+)
+
+
+if __name__ == "__main__":
+    pyzlc.init(
+        "policy_inference",
+        "141.3.53.25",
+        group_name="robot_lab_robotiq_202",
+        group_port=7725,
+    )
+
+    # Checkpoint path from eval_config.yaml
+    eval_checkpoint_path = (
+        "/home/jjiang/jing/model/beso/carrot_in_pan/checkpoints/010000/pretrained_model" 
+    )
+    eval_task = "put the toy carrot in the pan."
+    eval_dataset_path = "/home/jjiang/jing/dataset/lerobot/carrot_in_pan_trimmed" 
+
+    reset_checkpoint_path = (
+        "/home/jjiang/jing/model/xvla/carrot_reset/040000/pretrained_model" 
+    )
+    reset_task = "put the toy carrot back to the initial position."
+    reset_dataset_path = "/home/jjiang/jing/dataset/lerobot/carrot_in_pan_reset" 
+
+
+    follower = PandaRobotiq(
+        "PandaRobotiq",
+        RemotePandaArm("FrankaPanda"),
+        RemoteRobotiqGripper("FrankaPanda"),
+    )
+    control_pair = PolicyPandaRobotiqDeltaCartesianControlPair(
+        follower.panda_arm, follower.robotiq_gripper, 500, 10, 0.05
+    )
+
+    # Camera capture interval matches inference frequency (30 Hz = 0.033s)
+    static_cam = ImageDataWrapper(CameraDevice("static_cam", preview=False), hw_name="image")
+    wrist_cam = ImageDataWrapper(CameraDevice("wrist_cam", preview=False), hw_name="image2")
+
+    data_collectors: List[IRLDataWrapper] = []
+    data_collectors.append(static_cam)
+    data_collectors.append(wrist_cam)
+
+    data_collectors.append(PandaArmDataWrapper(follower.panda_arm))
+    data_collectors.append(RobotiqGripperDataWrapper(follower.robotiq_gripper))
+
+    eval_inference_cfg = LeRobotPolicyInferenceConfig(
+        checkpoint_path=eval_checkpoint_path,
+        task=eval_task,
+        fps=20, #20 for xvla, 8 for beso
+        device="cuda",
+        dataset_path=eval_dataset_path,
+    )
+
+    reset_inference_cfg = LeRobotPolicyInferenceConfig(
+        checkpoint_path=reset_checkpoint_path,
+        task=reset_task,
+        fps=20, #20 for xvla, 8 for beso
+        device="cuda",
+        dataset_path=reset_dataset_path,
+    )
+    inference_manager = VLAResetLeRobotInference(
+        data_collectors=data_collectors,
+        control_pair=control_pair,
+        eval_cfg=eval_inference_cfg,
+        reset_cfg=reset_inference_cfg,
+    )
+    try:
+        inference_manager.run()
+    finally:
+        pyzlc.shutdown()

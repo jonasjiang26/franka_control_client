@@ -575,40 +575,22 @@ class LeRobotPolicyInference(PolicyInferenceManager):
                 f"Preprocessor failed. image_shapes={image_shapes}, state_shape={tuple(observation['observation.state'].shape)}"
             ) from exc
 
-        # Evaluate policy and postprocess each action in the predicted chunk.
+        # Evaluate policy and postprocess one selected action.
         with torch.inference_mode():
-            ###action chunk
-            action_chunk = self.policy.predict_action_chunk(observation)
+            action = self.policy.select_action(observation)
 
-        if action_chunk.ndim == 2:
-            action_chunk = action_chunk.unsqueeze(1)
-        elif action_chunk.ndim != 3:
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        elif action.ndim != 2:
             raise RuntimeError(
-                f"Expected action_chunk to have shape (B, T, D) or (B, D), got {tuple(action_chunk.shape)}"
+                f"Expected action to have shape (B, D) or (D,), got {tuple(action.shape)}"
             )
 
-        batch_size, chunk_size, _ = action_chunk.shape
-        action_dim_expected = 8  # 7 joints + 1 gripper
-        post_action_chunk = torch.zeros(
-            (batch_size, chunk_size, action_dim_expected), dtype=torch.float32
-        )
-        for chunk_idx in range(chunk_size):
-            single_action = action_chunk[:, chunk_idx, :]
-            single_action = single_action[:, :8]
-            processed_action = self.postprocessor(single_action)
-            # pyzlc.info(f"Processed action chunk {chunk_idx}: {processed_action.float().cpu().numpy()}")
-            post_action_chunk[:, chunk_idx, :] = processed_action
+        processed_action = self.postprocessor(action)
+        action_vec = processed_action[0].float().cpu().numpy()
 
-        post_action_chunk = post_action_chunk.float().cpu().numpy()
-        for idx in range(len(post_action_chunk)):
-            pyzlc.info(
-                f"Postprocessed action chunk for batch {idx}: {post_action_chunk[idx]}"
-            )
         try:
-            # single_action
-            # self.control_pair.update_action(action_vec)
-            # action chunk
-            self.control_pair.update_action_chunk(post_action_chunk)
+            self.control_pair.update_action(action_vec)
         except Exception as exc:
             pyzlc.error(f"Failed to apply policy action: {exc}")
         end_time = time.perf_counter()

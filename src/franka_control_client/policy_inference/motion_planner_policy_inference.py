@@ -17,7 +17,11 @@ from ..control_pair.motion_planner_policy_panda_control_pair import (
     PolicyMotionPlannerControlPair,
 )
 from ..data_collection.irl_wrapper import IRLDataWrapper, ImageDataWrapper, PandaArmDataWrapper, RobotiqGripperDataWrapper
-from .policy_inference_manager import PolicyInferenceManager
+from .policy_inference_manager import (
+    PolicyInferenceEvent,
+    PolicyInferenceManager,
+    PolicyInferenceState,
+)
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.types import ContentPath, GoalToolPose, JointState, Pose
 
@@ -25,14 +29,14 @@ from curobo.types import ContentPath, GoalToolPose, JointState, Pose
 GRASPNET_CHECKPOINT_PATH = (
     "/home/jjiang/jing/graspnet-baseline/model/checkpoint-rs.tar"
 )
-GRASPNET_NUM_POINT = 30000
+GRASPNET_NUM_POINT = 20000
 GOAL_PCD_GRASPNET_NUM_POINT = GRASPNET_NUM_POINT
 GOAL_PCD_UPSAMPLE_K_NEIGHBORS = 6
 GRASPNET_NUM_VIEW = 300
-TOP_DOWN_GRASP_COS_THRESH = 0.1
+TOP_DOWN_GRASP_COS_THRESH = 0.8
 CENTER_GRASP_MAX_XY_DISTANCE_M = 0.06
 MIN_GRASP_WIDTH_M = 0.03
-MAX_GRASP_WIDTH_M = 0.055
+MAX_GRASP_WIDTH_M = 0.06
 POINT_CLOUD_STAT_NB_NEIGHBORS = 20
 POINT_CLOUD_STAT_STD_RATIO = 2.0
 POINT_CLOUD_CLUSTER_EPS_M = 0.02
@@ -49,7 +53,7 @@ GRASP_MOTION_PLAN_YAW_OFFSET_DEG = 45.0
 INITIAL_POSITION_XYZ = [
     0.4569405479296274,
     0.1208722997215983,
-    0.18180993839463131,
+    0.16880993839463131,
 ]
 INITIAL_QUAT_XYZW = [
     0.9200004670002642,
@@ -57,6 +61,10 @@ INITIAL_QUAT_XYZW = [
     0.02467542003362327,
     0.018904326619791186,
 ]
+GRIPPER_RELEASE_THRESHOLD = 0.5
+EVAL_STOP_SETTLE_S = 0.2
+EVAL_CONTROL_TOPIC = "policy2eval/control"
+EVAL_STATUS_TOPIC = "policy2eval/status"
 
 
 def upsample_point_cloud_by_interpolation(
@@ -469,7 +477,7 @@ class MotionPlannerInference(PolicyInferenceManager):
 #             device=device,
 #             dtype=torch.float32,
 #         )
-        position[..., 2] += 0.16 #= 0.17 lift the grasp pose up by 6cm to avoid collision during approach
+        position[..., 2] = 0.17 #= 0.17 lift the grasp pose up by 6cm to avoid collision during approach
         pyzlc.info(
             "Generated cuRobo grasp goal pose from GraspNet:\n"
             f"position={position.flatten().tolist()}\n"
@@ -632,12 +640,12 @@ class MotionPlannerInference(PolicyInferenceManager):
         self.control_pair.send_joint_state_plan(
             approach,
             grasp,
-            command_interval_s=0.1,
-            gripper_cmd=None,
+            command_interval_s=0.15,
+            gripper_cmd=0,
             max_waypoints_per_phase=5000,
-            joint_goal_tolerance=0.15,
+            joint_goal_tolerance=0.12,
         )
-        self.control_pair.send_gripper_state(1, blocking=True)
+        self.control_pair.send_gripper_state(0.2, blocking=True)
         pyzlc.sleep(2.0)  # wait for gripper to close before lifting
         pyzlc.info("Gripper closed, starting lift motion.")
         self.control_pair.send_joint_state_plan(
@@ -661,6 +669,7 @@ class MotionPlannerInference(PolicyInferenceManager):
             max_waypoints_per_phase=5000,
             joint_goal_tolerance=0.1
         )
+        pyzlc.sleep(1.0)
         self.control_pair.send_gripper_state(0, blocking=True)
         pyzlc.info("Place motion sent and gripper opened.")
         elapsed = time.perf_counter() - start_time
@@ -700,3 +709,187 @@ class MotionPlannerInference(PolicyInferenceManager):
 
     def _stop_infering(self) -> None:
         super()._stop_infering()
+
+
+class Policy2EvalMotionPlannerInference(MotionPlannerInference):
+    def __init__(
+        self,
+        data_collectors: List[IRLDataWrapper],
+        control_pair: PolicyMotionPlannerControlPair,
+        task: str,
+        scene: str,
+        cfg=None,
+        eval_control_topic: str = EVAL_CONTROL_TOPIC,
+    ) -> None:
+        super().__init__(
+            data_collectors=data_collectors,
+            control_pair=control_pair,
+            task=task,
+            scene=scene,
+            cfg=cfg,
+        )
+        self.single_step = False
+        self.eval_control_topic = eval_control_topic
+        self.eval_control_pub = pyzlc.Publisher(eval_control_topic)
+        self._active_stage = "idle"
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        self._reset_motion_done = False
+        self._reset_release_watch()
+
+    def _publish_eval_control(self, command: str) -> None:
+        payload = {"command": command, "timestamp": time.time()}
+        pyzlc.info(f"Sending eval control signal: {payload}")
+        self.eval_control_pub.publish(payload)
+
+    def _reset_release_watch(self) -> None:
+        self._saw_closed_gripper = False
+        self._first_release_detected = False
+
+    def _get_gripper_sensor_value(self) -> Optional[float]:
+        if self.gripper is None:
+            return None
+
+        state = self.gripper.current_state
+        if not isinstance(state, dict):
+            return None
+
+        if "position" in state:
+            return float(state["position"])
+        if "width" in state:
+            return float(state["width"])
+        if "gripper" in state:
+            gripper_arr = np.asarray(state["gripper"], dtype=np.float32).reshape(-1)
+            if gripper_arr.size > 0:
+                return float(gripper_arr[0])
+        return None
+
+    def _update_release_watch(self) -> bool:
+        if self._first_release_detected:
+            return False
+
+        gripper_value = self._get_gripper_sensor_value()
+        if gripper_value is None:
+            return False
+
+        gripper_closed = gripper_value >= GRIPPER_RELEASE_THRESHOLD
+        if gripper_closed:
+            self._saw_closed_gripper = True
+            return False
+        if not self._saw_closed_gripper:
+            return False
+
+        self._first_release_detected = True
+        return True
+
+    def _handle_custom_keypress(self, key: str) -> bool:
+        if key == "d" and self._state_machine.state == PolicyInferenceState.INFERING:
+            self._publish_eval_control("stop")
+            self._clear_stage_state()
+            self._state_machine.trigger(PolicyInferenceEvent.DISCARD)
+            return True
+
+        if key == "c" and self._state_machine.state == PolicyInferenceState.INFERING:
+            self._start_motion_planner_reset()
+            return True
+
+        if (
+            key == "e"
+            and self._active_stage == "reset"
+            and self._awaiting_eval_confirmation
+            and self._state_machine.state == PolicyInferenceState.INFERING
+        ):
+            self._start_next_eval()
+            return True
+
+        return False
+
+    def _clear_stage_state(self) -> None:
+        self._active_stage = "idle"
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        self._reset_motion_done = False
+        self._reset_release_watch()
+
+    def _start_motion_planner_reset(self) -> None:
+        self._publish_eval_control("stop")
+        pyzlc.sleep(EVAL_STOP_SETTLE_S)
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        self._ui_console.log("Moving robot to reset position before motion planner reset...")
+        self.control_pair.go_reset_position()
+        self._active_stage = "reset"
+        self._reset_motion_done = False
+        self._reset_release_watch()
+        self._ui_console.update_hint("Running motion planner reset...")
+
+    def _start_next_eval(self) -> None:
+        self._awaiting_eval_confirmation = False
+        self._ui_console.log("Moving robot home before next eval rollout...")
+        self.control_pair.go_home()
+        self._active_stage = "eval"
+        self._reset_release_watch()
+        self._publish_eval_control("start")
+        self._ui_console.update_hint(
+            "Eval policy running in policy2eval node. Press 'c' after first gripper release, "
+            "'d' to discard, or 'q' to quit"
+        )
+
+    def _start_infering(self) -> None:
+        self._active_stage = "eval"
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        self._reset_motion_done = False
+        self._reset_release_watch()
+        self._publish_eval_control("start")
+        self._ui_console.update_hint(
+            "Eval policy running in policy2eval node. Press 'c' after first gripper release, "
+            "'d' to discard, or 'q' to quit"
+        )
+
+    def _infer_step(self) -> bool:
+        if self._active_stage == "eval":
+            if self._update_release_watch():
+                self._awaiting_reset_confirmation = True
+                self._ui_console.update_hint(
+                    "Eval gripper released. Press 'c' to stop eval and run motion planner reset, "
+                    "'d' to discard, or 'q' to quit"
+                )
+            time.sleep(0.02)
+            return False
+
+        if self._active_stage == "reset":
+            if self._reset_motion_done:
+                time.sleep(0.05)
+                return False
+
+            self._reset_motion_done = True
+            success = MotionPlannerInference._infer_step(self)
+            if not success:
+                self._ui_console.update_hint(
+                    "Motion planner reset failed. Press 'd' to discard, or 'q' to quit"
+                )
+                return False
+
+            self._awaiting_eval_confirmation = True
+            self._ui_console.update_hint(
+                "Motion planner reset gripper released. Press 'c' to retry reset, "
+                "'e' to go home and start eval, 'd' to discard, or 'q' to quit"
+            )
+            return False
+
+        time.sleep(0.05)
+        return False
+
+    def _discard_infering(self) -> None:
+        self._publish_eval_control("stop")
+        self._clear_stage_state()
+        self._ui_console.log("Episode discarded.")
+
+    def _stop_infering(self) -> None:
+        self._publish_eval_control("stop")
+        super()._stop_infering()
+
+    def _close(self):
+        self._publish_eval_control("stop")
+        return super()._close()

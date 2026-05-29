@@ -22,8 +22,8 @@ GRIPPER_FORCE = 0.3
 ACTION_LOG_INTERVAL_S: float = 0.5
 GRIPPER_TOGGLE_WARN_WINDOW_S: float = 3.0
 GRIPPER_TOGGLE_WARN_COUNT: int = 6
-DEFAULT_POSITION = (-0.004130148435868949, -0.44525626400527235, -0.41870706822997644, -1.9917511410951767, 0.026043221903544283, 2.04957658561372, -0.4137259566832098)
-
+DEFAULT_POSITION = (0.0, 0.0, 0.0, -2.15, 0.0, 2.15, 0.0)
+RESET_POSITION = (-0.004130148435868949, -0.44525626400527235, -0.41870706822997644, -1.9917511410951767, 0.026043221903544283, 2.04957658561372, -0.4137259566832098)  
 # Calculate velocity limits using the standard approach from training
 VELOCITY_LIMITS = np.array([[-4 * np.pi / 2, 4 * np.pi / 2]] * 7).T / 32
 VELOCITY_LIMITS_NORM = float(np.linalg.norm(VELOCITY_LIMITS))
@@ -272,6 +272,16 @@ class PolicyPandaControlPair(ControlPair):
             force=GRIPPER_FORCE,
             blocking=True,
         )
+    def go_reset_position(self) -> None:
+        self.panda_arm.move_franka_arm_to_joint_position(RESET_POSITION)
+        # Open the gripper
+        self.gripper.send_grasp_command(
+            position=0.0,
+            speed=GRIPPER_SPEED,
+            force=GRIPPER_FORCE,
+            blocking=True,
+        )
+        pyzlc.sleep(1.0)
 
     def control_step(self) -> None:
         # start_time = time.perf_counter()
