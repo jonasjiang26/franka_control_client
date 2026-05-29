@@ -177,6 +177,8 @@ class PolicyInferenceManager(abc.ABC):
             self._close()
 
     def _handle_keypress(self, key: str) -> None:
+        if self._handle_custom_keypress(key):
+            return
         if key == "n":
             self._state_machine.trigger(PolicyInferenceEvent.NEW_EPISODE)
         elif key == "s":
@@ -187,6 +189,9 @@ class PolicyInferenceManager(abc.ABC):
             self._state_machine.trigger(PolicyInferenceEvent.QUIT)
         elif key == "r":
             self._state_machine.trigger(PolicyInferenceEvent.RESET_ARM)
+
+    def _handle_custom_keypress(self, key: str) -> bool:
+        return False
 
     def _on_state_enter(self, state: PolicyInferenceState) -> None:
         if state == PolicyInferenceState.WAITING:

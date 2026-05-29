@@ -260,7 +260,7 @@ class PolicyMotionPlannerControlPair(PolicyPandaControlPair):
             quat_wxyz_to_xyzw(action[3:7]),
         )
         
-        print(f"Applied command: {action}")
+        # print(f"Applied command: {action}")
         
         # Gripper command
         gripper_cmd = float(action[-1])

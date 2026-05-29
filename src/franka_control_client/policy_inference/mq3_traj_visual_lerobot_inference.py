@@ -144,10 +144,7 @@ class MQ3TrajVisualLeRobotInference(LeRobotPolicyInference):
         processed_action = self.postprocessor(action)
         action_vec = processed_action[0].float().cpu().numpy()
 
-        try:
-            self.control_pair.update_action(action_vec)
-        except Exception as exc:
-            pyzlc.error(f"Failed to apply policy action: {exc}")
+        self._handle_policy_action(action_vec)
         end_time = time.perf_counter()
         elapsed = end_time - start_time
         # print(f"Inference step took {elapsed:.4f} seconds.")
@@ -160,6 +157,12 @@ class MQ3TrajVisualLeRobotInference(LeRobotPolicyInference):
     def _close(self):
         self.running = False
         return super()._close()
+
+    def _handle_policy_action(self, action_vec: np.ndarray) -> None:
+        try:
+            self.control_pair.update_action(action_vec)
+        except Exception as exc:
+            pyzlc.error(f"Failed to apply policy action: {exc}")
 
     def _reset_arm(self):
         self.control_pair.reset_action()

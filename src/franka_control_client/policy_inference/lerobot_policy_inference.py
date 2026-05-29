@@ -449,7 +449,7 @@ class LeRobotPolicyInference(PolicyInferenceManager):
         q = np.asarray(arm_state[0], dtype=np.float32).reshape(-1)
         rot = np.asarray(arm_state[1], dtype=np.float32).reshape(-1)
         q = np.concatenate([q, rot], dtype=np.float32)
-        print(f"fed in arm state: q={q}")
+        # print(f"fed in arm state: q={q}")
         grip_state = self.gripper_wrapper.capture_step()
         gripper_val = None
         if isinstance(grip_state, dict):
@@ -471,7 +471,7 @@ class LeRobotPolicyInference(PolicyInferenceManager):
     def _build_images(self) -> Dict[str, Any]:
         images: Dict[str, Any] = {}
         for cam in self.cameras:
-            rgb_image, depth_image = cam.capture_step()
+            rgb_image = cam.capture_step()
             if rgb_image is None:
                 continue
             if isinstance(rgb_image, np.ndarray):
@@ -486,7 +486,7 @@ class LeRobotPolicyInference(PolicyInferenceManager):
                     "width": int(w),
                     "channels": int(c),
                     "rgb_data": frame.tobytes(),
-                    "depth_data": None if depth_image is None else depth_image.tobytes(),
+                    "depth_data": None,
                 }
             else:
                 images[cam.hw_name] = frame
