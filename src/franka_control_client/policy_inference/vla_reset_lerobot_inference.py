@@ -1,6 +1,8 @@
+import pprint
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import pyzlc
 
 from ..control_pair.cartesian_policy_panda_control_pair import (
     PolicyPandaRobotiqDeltaCartesianControlPair,
@@ -11,6 +13,10 @@ from .mq3_traj_visual_lerobot_inference import MQ3TrajVisualLeRobotInference
 from .policy_inference_manager import PolicyInferenceEvent, PolicyInferenceState
 
 GRIPPER_RELEASE_THRESHOLD = 0.5
+SUCCESS_CHECKER_SERVICE_NAME = "phase_1_success_checker"
+SUCCESS_CHECKER_GROUP_NAME = "robot_lab_robotiq_202"
+SUCCESS_CHECKER_REQUEST_TIMEOUT = 60.0
+SUCCESS_CHECKER_FRAME_TIMEOUT = 10.0
 
 
 class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
@@ -34,6 +40,10 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         self._reset_release_watch()
         self._awaiting_reset_confirmation = False
         self._awaiting_eval_confirmation = False
+        self._success_checker_service_name = SUCCESS_CHECKER_SERVICE_NAME
+        self._success_checker_group_name = SUCCESS_CHECKER_GROUP_NAME
+        self._success_checker_request_timeout = SUCCESS_CHECKER_REQUEST_TIMEOUT
+        self._success_checker_frame_timeout = SUCCESS_CHECKER_FRAME_TIMEOUT
 
     def _capture_policy_bundle(
         self,
@@ -90,7 +100,8 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         self._first_release_detected = False
 
     def _handle_policy_action(self, action_vec: np.ndarray) -> None:
-        self._update_release_watch()
+        if self._update_release_watch():
+            return
         super()._handle_policy_action(action_vec)
 
     def _get_gripper_sensor_value(self) -> Optional[float]:
@@ -113,32 +124,97 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
                 return float(gripper_arr[0])
         return None
 
-    def _update_release_watch(self) -> None:
+    def _update_release_watch(self) -> bool:
         if self._first_release_detected:
-            return
+            return False
 
         gripper_value = self._get_gripper_sensor_value()
         if gripper_value is None:
-            return
+            return False
 
         gripper_closed = gripper_value >= GRIPPER_RELEASE_THRESHOLD
         if gripper_closed:
             self._saw_closed_gripper = True
-            return
+            return False
         if not self._saw_closed_gripper:
-            return
+            return False
 
         self._first_release_detected = True
         if self._active_policy_name == "eval":
-            self._awaiting_reset_confirmation = True
-            self._ui_console.update_hint(
-                "Eval gripper released. Press 'c' to begin scene reset, 'd' to discard, or 'q' to quit"
-            )
+            self._handle_eval_release()
+            return True
         elif self._active_policy_name == "reset":
-            self._awaiting_eval_confirmation = True
-            self._ui_console.update_hint(
-                "Reset gripper released. Press 'e' to begin a new eval episode, 'd' to discard, or 'q' to quit"
+            self._handle_reset_release()
+            return True
+        return False
+
+    def _handle_eval_release(self) -> None:
+        response = self._request_success_checker("task state")
+        self._print_success_checker_response("task state", response)
+        self._start_reset_policy()
+
+    def _handle_reset_release(self) -> None:
+        response = self._request_success_checker("reset state")
+        self._print_success_checker_response("reset state", response)
+        if self._reset_succeeded(response):
+            self._start_eval_policy()
+            return
+
+        print("waiting for human interruption", flush=True)
+        self._ui_console.log("waiting for human interruption")
+        self._clear_policy_switch_state()
+        self._state_machine.trigger(PolicyInferenceEvent.DISCARD)
+
+    def _request_success_checker(self, state_request: str) -> Any:
+        request = {
+            "state": state_request,
+            "wait_for_new_frame": True,
+            "frame_timeout": self._success_checker_frame_timeout,
+        }
+        request_fn = getattr(pyzlc, "call", None) or getattr(pyzlc, "zlc_request")
+        try:
+            return request_fn(
+                self._success_checker_service_name,
+                request,
+                timeout=self._success_checker_request_timeout,
+                group_name=self._success_checker_group_name,
             )
+        except Exception as exc:
+            return {
+                "success": False,
+                "state": "",
+                "message": str(exc),
+            }
+
+    def _print_success_checker_response(self, state_request: str, response: Any) -> None:
+        response_text = pprint.pformat(response)
+        message = (
+            f"{self._success_checker_service_name} {state_request} response:\n"
+            f"{response_text}"
+        )
+        print(message, flush=True)
+        pyzlc.info(message)
+
+    def _reset_succeeded(self, response: Any) -> bool:
+        texts = []
+        if isinstance(response, dict):
+            for key in ("state", "raw_response", "message"):
+                value = response.get(key)
+                if value is not None:
+                    texts.append(str(value))
+        texts.append(str(response))
+
+        for text in texts:
+            normalized = text.strip().lower()
+            if "failed" in normalized or "failure" in normalized:
+                continue
+            if normalized == "reset success":
+                return True
+            if "the reset succeeded" in normalized:
+                return True
+            if "reset succeeded" in normalized or "reset success" in normalized:
+                return True
+        return False
 
     def _handle_custom_keypress(self, key: str) -> bool:
         if key == "d" and self._state_machine.state == PolicyInferenceState.INFERING:
