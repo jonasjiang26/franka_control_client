@@ -65,6 +65,10 @@ GRIPPER_RELEASE_THRESHOLD = 0.5
 EVAL_STOP_SETTLE_S = 0.2
 EVAL_CONTROL_TOPIC = "policy2eval/control"
 EVAL_STATUS_TOPIC = "policy2eval/status"
+DEFAULT_PYZLC_GROUP = "robot_lab_robotiq_202"
+SUCCESS_CHECKER_SERVICE = "phase_1_success_checker"
+SUCCESS_CHECKER_TIMEOUT_S = 300
+SUCCESS_CHECKER_FRAME_TIMEOUT_S = 10.0
 
 
 def upsample_point_cloud_by_interpolation(
@@ -566,7 +570,7 @@ class MotionPlannerInference(PolicyInferenceManager):
         }
         pyzlc.info(f"Sending request: {request}")
         service_name = "scene_graph"
-        group_name = "robot_lab_robotiq_202"
+        group_name = DEFAULT_PYZLC_GROUP
 
         response = None
         while response is None:
@@ -720,6 +724,8 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
         scene: str,
         cfg=None,
         eval_control_topic: str = EVAL_CONTROL_TOPIC,
+        success_checker_service: str = SUCCESS_CHECKER_SERVICE,
+        success_checker_group_name: str = DEFAULT_PYZLC_GROUP,
     ) -> None:
         super().__init__(
             data_collectors=data_collectors,
@@ -731,6 +737,8 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
         self.single_step = False
         self.eval_control_topic = eval_control_topic
         self.eval_control_pub = pyzlc.Publisher(eval_control_topic)
+        self.success_checker_service = success_checker_service
+        self.success_checker_group_name = success_checker_group_name
         self._active_stage = "idle"
         self._awaiting_reset_confirmation = False
         self._awaiting_eval_confirmation = False
@@ -745,6 +753,166 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
     def _reset_release_watch(self) -> None:
         self._saw_closed_gripper = False
         self._first_release_detected = False
+
+    def _normalize_success_checker_state(
+        self,
+        response: Any,
+        current_stage: str,
+    ) -> Optional[str]:
+        if not isinstance(response, dict):
+            return None
+
+        service_success = response.get("success")
+        if service_success is False:
+            message = str(response.get("message", ""))
+            if "Could not parse LLM state response" in message:
+                pyzlc.warning(
+                    "Success checker returned an unparsable LLM answer; "
+                    "falling back to reset."
+                )
+                return "reset"
+            return None
+
+        for key in (
+            "next_state",
+            "state",
+            "next_stage",
+            "stage",
+            "action",
+            "decision",
+            "mode",
+        ):
+            value = response.get(key)
+            if value is None:
+                continue
+
+            state = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+            if state in {"task_succeeded", "task_success", "task_failed", "task_failure"}:
+                return "reset"
+            if state in {"task_ongoing", "task_continue"}:
+                return "rollout"
+            if state in {"reset_succeeded", "reset_success"}:
+                return "rollout"
+            if state in {"reset_failed", "reset_failure", "reset_ongoing"}:
+                return "reset"
+            if state in {"reset", "retry_reset", "scene_reset"}:
+                return "reset"
+            if state in {
+                "rollout",
+                "roll_out",
+                "eval",
+                "evaluation",
+                "continue",
+                "next_eval",
+                "success",
+                "succeeded",
+                "done",
+            }:
+                return "rollout"
+            if state in {"failure", "failed", "not_success", "not_successful"}:
+                return "reset"
+
+        for key in (
+            "is_success",
+            "task_success",
+            "reset_success",
+            "succeeded",
+        ):
+            if key not in response:
+                continue
+
+            value = response[key]
+            if isinstance(value, str):
+                normalized_value = value.strip().lower()
+                if normalized_value in {"true", "yes", "1", "success", "succeeded"}:
+                    success = True
+                elif normalized_value in {"false", "no", "0", "failure", "failed"}:
+                    success = False
+                else:
+                    continue
+            else:
+                success = bool(value)
+            if current_stage == "reset":
+                return "rollout" if success else "reset"
+            return "reset" if success else "rollout"
+
+        return None
+
+    def _wait_for_success_checker_state(self, current_stage: str) -> str:
+        request_id = uuid.uuid4().hex
+        request = {
+            "request_id": request_id,
+            "state": "roll-out state" if current_stage == "rollout" else "reset state",
+            "wait_for_new_frame": False,
+            "frame_timeout": SUCCESS_CHECKER_FRAME_TIMEOUT_S,
+        }
+        pyzlc.info(
+            f"Sending success-checker request to {self.success_checker_service!r}: "
+            f"{request}"
+        )
+
+        while True:
+            if not pyzlc.wait_for_service(
+                self.success_checker_service,
+                timeout=5,
+                group_name=self.success_checker_group_name,
+            ):
+                pyzlc.warning(
+                    f"Waiting for service {self.success_checker_service!r} "
+                    "to become available."
+                )
+                time.sleep(0.5)
+                continue
+
+            response = pyzlc.call(
+                self.success_checker_service,
+                request,
+                timeout=SUCCESS_CHECKER_TIMEOUT_S,
+                group_name=self.success_checker_group_name,
+            )
+            if response is None:
+                pyzlc.warning(
+                    f"Still waiting for service {self.success_checker_service!r} "
+                    "response."
+                )
+                continue
+
+            response_id = response.get("request_id") if isinstance(response, dict) else None
+            if response_id is not None and response_id != request_id:
+                pyzlc.info(f"Ignoring stale success-checker response: {response!r}")
+                time.sleep(0.5)
+                continue
+
+            next_state = self._normalize_success_checker_state(
+                response,
+                current_stage=current_stage,
+            )
+            if next_state is None:
+                pyzlc.warning(
+                    "Success checker response did not include a reset/rollout "
+                    f"decision: {response!r}"
+                )
+                time.sleep(0.5)
+                continue
+
+            pyzlc.info(
+                f"Success checker selected next state {next_state!r}: {response!r}"
+            )
+            return next_state
+
+    def _route_from_success_checker(self, current_stage: str) -> None:
+        if current_stage == "rollout":
+            self._publish_eval_control("stop")
+            pyzlc.sleep(EVAL_STOP_SETTLE_S)
+
+        self._ui_console.update_hint(
+            "Asking LLM success checker whether to reset or start rollout..."
+        )
+        next_state = self._wait_for_success_checker_state(current_stage)
+        if next_state == "reset":
+            self._start_motion_planner_reset()
+        else:
+            self._start_next_eval()
 
     def _get_gripper_sensor_value(self) -> Optional[float]:
         if self.gripper is None:
@@ -764,23 +932,26 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
                 return float(gripper_arr[0])
         return None
 
-    def _update_release_watch(self) -> bool:
+    def _update_release_watch(self) -> None:
         if self._first_release_detected:
-            return False
+            return
 
         gripper_value = self._get_gripper_sensor_value()
         if gripper_value is None:
-            return False
+            return
 
         gripper_closed = gripper_value >= GRIPPER_RELEASE_THRESHOLD
         if gripper_closed:
             self._saw_closed_gripper = True
-            return False
+            return
         if not self._saw_closed_gripper:
-            return False
+            return
 
         self._first_release_detected = True
-        return True
+        if self._active_stage == "eval":
+            self._route_from_success_checker("rollout")
+        elif self._active_stage == "reset":
+            self._route_from_success_checker("reset")
 
     def _handle_custom_keypress(self, key: str) -> bool:
         if key == "d" and self._state_machine.state == PolicyInferenceState.INFERING:
@@ -789,14 +960,17 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
             self._state_machine.trigger(PolicyInferenceEvent.DISCARD)
             return True
 
-        if key == "c" and self._state_machine.state == PolicyInferenceState.INFERING:
+        if (
+            key == "c"
+            and self._active_stage in {"eval", "reset"}
+            and self._state_machine.state == PolicyInferenceState.INFERING
+        ):
             self._start_motion_planner_reset()
             return True
 
         if (
             key == "e"
-            and self._active_stage == "reset"
-            and self._awaiting_eval_confirmation
+            and self._active_stage in {"eval", "reset"}
             and self._state_machine.state == PolicyInferenceState.INFERING
         ):
             self._start_next_eval()
@@ -825,13 +999,16 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
 
     def _start_next_eval(self) -> None:
         self._awaiting_eval_confirmation = False
+        self._awaiting_reset_confirmation = False
+        self._publish_eval_control("stop")
+        pyzlc.sleep(EVAL_STOP_SETTLE_S)
         self._ui_console.log("Moving robot home before next eval rollout...")
         self.control_pair.go_home()
         self._active_stage = "eval"
         self._reset_release_watch()
         self._publish_eval_control("start")
         self._ui_console.update_hint(
-            "Eval policy running in policy2eval node. Press 'c' after first gripper release, "
+            "Eval policy running in policy2eval node. Waiting for first gripper release. "
             "'d' to discard, or 'q' to quit"
         )
 
@@ -843,18 +1020,13 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
         self._reset_release_watch()
         self._publish_eval_control("start")
         self._ui_console.update_hint(
-            "Eval policy running in policy2eval node. Press 'c' after first gripper release, "
+            "Eval policy running in policy2eval node. Waiting for first gripper release. "
             "'d' to discard, or 'q' to quit"
         )
 
     def _infer_step(self) -> bool:
         if self._active_stage == "eval":
-            if self._update_release_watch():
-                self._awaiting_reset_confirmation = True
-                self._ui_console.update_hint(
-                    "Eval gripper released. Press 'c' to stop eval and run motion planner reset, "
-                    "'d' to discard, or 'q' to quit"
-                )
+            self._update_release_watch()
             time.sleep(0.02)
             return False
 
@@ -871,11 +1043,7 @@ class Policy2EvalMotionPlannerInference(MotionPlannerInference):
                 )
                 return False
 
-            self._awaiting_eval_confirmation = True
-            self._ui_console.update_hint(
-                "Motion planner reset gripper released. Press 'c' to retry reset, "
-                "'e' to go home and start eval, 'd' to discard, or 'q' to quit"
-            )
+            self._route_from_success_checker("reset")
             return False
 
         time.sleep(0.05)
