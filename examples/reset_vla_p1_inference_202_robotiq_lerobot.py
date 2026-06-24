@@ -36,17 +36,18 @@ if __name__ == "__main__":
 
     # Checkpoint path from eval_config.yaml
     eval_checkpoint_path = (
-        "/home/jjiang/jing/model/beso/carrot_in_pan/checkpoints/010000/pretrained_model" 
+        "/home/jjiang/jing/model/beso/lemon_in_drawer2/checkpoints/010000/pretrained_model" 
     )
-    eval_task = "put the toy carrot in the pan."
-    eval_dataset_path = "/home/jjiang/jing/dataset/lerobot/carrot_in_pan_trimmed" 
+    eval_task = "put lemon in the lower drawer"
+    eval_dataset_path = "/home/jjiang/jing/dataset/lerobot/lemon_in_drawer2" 
 
     reset_checkpoint_path = (
-        "/home/jjiang/jing/model/xvla/carrot_reset/040000/pretrained_model" 
+        "/home/jjiang/jing/model/xvla/lemon_drawer_reset/080000/pretrained_model" 
     )
-    reset_task = "put the toy carrot back to the initial position."
-    reset_dataset_path = "/home/jjiang/jing/dataset/lerobot/carrot_in_pan_reset" 
+    reset_task = "open the drawer."
+    reset_dataset_path = "/home/jjiang/jing/dataset/lerobot/hier_reset_lemon_in_drawer" 
 
+    items_prompt = "drawer. lemon. plate."
 
     follower = PandaRobotiq(
         "PandaRobotiq",
@@ -71,7 +72,7 @@ if __name__ == "__main__":
     eval_inference_cfg = LeRobotPolicyInferenceConfig(
         checkpoint_path=eval_checkpoint_path,
         task=eval_task,
-        fps=20, #20 for xvla, 8 for beso
+        fps=10, #20 for xvla, 8 for beso
         device="cuda",
         dataset_path=eval_dataset_path,
     )
@@ -88,6 +89,7 @@ if __name__ == "__main__":
         control_pair=control_pair,
         eval_cfg=eval_inference_cfg,
         reset_cfg=reset_inference_cfg,
+        items=items_prompt
     )
     try:
         inference_manager.run()

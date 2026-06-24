@@ -23,6 +23,8 @@ ACTION_LOG_INTERVAL_S: float = 0.5
 GRIPPER_TOGGLE_WARN_WINDOW_S: float = 3.0
 GRIPPER_TOGGLE_WARN_COUNT: int = 6
 DEFAULT_POSITION = (0.0, 0.0, 0.0, -2.15, 0.0, 2.15, 0.0)
+DEFAULT_POSITION2 = (-0.30406295828651964, -0.10313557727047261, -0.17526436078783472, -2.1124992416113964, -0.03802868800288364, 2.001340827254022, -0.46061141536409717)
+
 
 # Calculate velocity limits using the standard approach from training
 VELOCITY_LIMITS = np.array([[-4 * np.pi / 2, 4 * np.pi / 2]] * 7).T / 32
@@ -264,7 +266,7 @@ class PolicyPandaControlPair(ControlPair):
         self.panda_arm.send_joint_position_command(current_joint_pos)
 
     def go_home(self) -> None:
-        self.panda_arm.move_franka_arm_to_joint_position(DEFAULT_POSITION)
+        self.panda_arm.move_franka_arm_to_joint_position(DEFAULT_POSITION2)
         # Open the gripper
         self.gripper.send_grasp_command(
             position=0.0,
@@ -272,6 +274,10 @@ class PolicyPandaControlPair(ControlPair):
             force=GRIPPER_FORCE,
             blocking=True,
         )
+
+    def lift_arm(self) -> None:
+        self.panda_arm.move_franka_arm_to_joint_position(DEFAULT_POSITION2)
+
 
     def control_step(self) -> None:
         # start_time = time.perf_counter()

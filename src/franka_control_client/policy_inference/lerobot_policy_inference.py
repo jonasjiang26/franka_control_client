@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import gc
 import sys
 import time
 import types
@@ -117,6 +118,7 @@ class LeRobotPolicyInferenceConfig:
     device: str = "cuda"
     policy_dtype: Optional[str] = None
     dataset_path: Optional[str] = None
+    lazy_load_policy: bool = False
 
 
 class LeRobotPolicyInference(PolicyInferenceManager):
@@ -162,12 +164,13 @@ class LeRobotPolicyInference(PolicyInferenceManager):
         if self.gripper_wrapper is None:
             raise ValueError("Missing gripper wrapper for inference.")
 
-        # Load policy stack directly
         self.train_cfg = self._load_train_cfg()
         pyzlc.info(f"Loaded train config: {self.train_cfg}")
-        self.policy, self.preprocessor, self.postprocessor = (
-            self._load_policy_stack()
-        )
+        self.policy = None
+        self.preprocessor = None
+        self.postprocessor = None
+        if not self.cfg.lazy_load_policy:
+            self._ensure_policy_loaded()
 
         self._expected_image_shapes = self._get_expected_image_shapes()
         self._expected_state_dim = self._get_expected_state_dim()
@@ -255,6 +258,35 @@ class LeRobotPolicyInference(PolicyInferenceManager):
         )
 
         return policy, preprocessor, postprocessor
+
+    def _ensure_policy_loaded(self) -> None:
+        if (
+            self.policy is not None
+            and self.preprocessor is not None
+            and self.postprocessor is not None
+        ):
+            return
+
+        pyzlc.info(f"Loading policy for task: {self.task}")
+        self.policy, self.preprocessor, self.postprocessor = (
+            self._load_policy_stack()
+        )
+
+    def _unload_policy_stack(self) -> None:
+        if (
+            self.policy is None
+            and self.preprocessor is None
+            and self.postprocessor is None
+        ):
+            return
+
+        pyzlc.info(f"Unloading policy for task: {self.task}")
+        self.policy = None
+        self.preprocessor = None
+        self.postprocessor = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _decode_image(self, img: Any) -> np.ndarray:
         """Decode image from various formats."""
@@ -546,6 +578,7 @@ class LeRobotPolicyInference(PolicyInferenceManager):
         )
 
     def _start_infering(self) -> None:
+        self._ensure_policy_loaded()
         # Reset action state for new episode
         self.control_pair.reset_action()
         self.policy.reset()
@@ -630,6 +663,8 @@ class LeRobotPolicyInference(PolicyInferenceManager):
 
     def _stop_infering(self) -> None:
         super()._stop_infering()
+        if self.cfg.lazy_load_policy:
+            self._unload_policy_stack()
 
     def _reset_arm(self) -> None:
         """Reset the robot arm to a safe/home position.
@@ -640,7 +675,20 @@ class LeRobotPolicyInference(PolicyInferenceManager):
         try:
             # Reset the arm to home position
             self.control_pair.go_home()
-            time.sleep(3)  # Wait for the arm to reach the home position
+            time.sleep(3) 
             self._ui_console.log("Robot arm reset to home position.")
         except Exception as exc:
             self._ui_console.log(f"Failed to reset arm: {exc}")
+
+    def _lift_arm(self) -> None:
+        """Lift the robot arm to a safe position.
+
+        Called only when in WAITING state (control pair is not running).
+        """
+        self._ui_console.log("Lifting robot arm...")
+        try:
+            # Lift the arm to a safe position
+            self.control_pair.lift_arm()
+            self._ui_console.log("Robot arm lifted to safe position.")
+        except Exception as exc:
+            self._ui_console.log(f"Failed to lift arm: {exc}")

@@ -1,4 +1,7 @@
 import pprint
+import threading
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -13,10 +16,10 @@ from .mq3_traj_visual_lerobot_inference import MQ3TrajVisualLeRobotInference
 from .policy_inference_manager import PolicyInferenceEvent, PolicyInferenceState
 
 GRIPPER_RELEASE_THRESHOLD = 0.5
-SUCCESS_CHECKER_SERVICE_NAME = "phase_1_success_checker"
-SUCCESS_CHECKER_GROUP_NAME = "robot_lab_robotiq_202"
-SUCCESS_CHECKER_REQUEST_TIMEOUT = 60.0
-SUCCESS_CHECKER_FRAME_TIMEOUT = 10.0
+PYZLC_GROUP_NAME = "robot_lab_robotiq_202"
+SPATIAL_RELATION_SERVICE_NAME = "scene_graph"
+SPATIAL_RELATION_REQUEST_INTERVAL = 6.0
+SPATIAL_RELATION_REQUEST_TIMEOUT = 60.0
 
 
 class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
@@ -26,7 +29,10 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         control_pair: PolicyPandaRobotiqDeltaCartesianControlPair,
         eval_cfg: LeRobotPolicyInferenceConfig,
         reset_cfg: LeRobotPolicyInferenceConfig,
+        items: str
     ) -> None:
+        eval_cfg.lazy_load_policy = True
+        reset_cfg.lazy_load_policy = True
         super().__init__(data_collectors, control_pair, eval_cfg)
         self.eval_cfg = eval_cfg
         self.reset_cfg = reset_cfg
@@ -35,15 +41,27 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         }
         self._policy_bundles["reset"] = self._load_policy_bundle(reset_cfg)
         self._active_policy_name = "eval"
+        self.item_prompt = items
         self._next_start_policy_name: Optional[str] = None
         self._restore_policy_bundle(self._policy_bundles["eval"])
         self._reset_release_watch()
         self._awaiting_reset_confirmation = False
         self._awaiting_eval_confirmation = False
-        self._success_checker_service_name = SUCCESS_CHECKER_SERVICE_NAME
-        self._success_checker_group_name = SUCCESS_CHECKER_GROUP_NAME
-        self._success_checker_request_timeout = SUCCESS_CHECKER_REQUEST_TIMEOUT
-        self._success_checker_frame_timeout = SUCCESS_CHECKER_FRAME_TIMEOUT
+        self._pyzlc_group_name = PYZLC_GROUP_NAME
+        self._spatial_relation_service_name = SPATIAL_RELATION_SERVICE_NAME
+        self._spatial_relation_request_interval = (
+            SPATIAL_RELATION_REQUEST_INTERVAL
+        )
+        self._spatial_relation_request_timeout = (
+            SPATIAL_RELATION_REQUEST_TIMEOUT
+        )
+        self._next_spatial_relation_request_ts = 0.0
+        self._spatial_relation_request_lock = threading.Lock()
+        self._spatial_relation_request_in_flight = False
+        self._pending_spatial_relation_request_reason: Optional[str] = None
+        self._pending_spatial_relation_force_new = False
+        self._spatial_relation_request_id: Optional[str] = None
+        self._spatial_relation_request_prompt: Optional[str] = None
 
     def _capture_policy_bundle(
         self,
@@ -81,9 +99,9 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         self.task = cfg.task
         self.fps = cfg.fps
         self.train_cfg = self._load_train_cfg()
-        self.policy, self.preprocessor, self.postprocessor = (
-            self._load_policy_stack()
-        )
+        self.policy = None
+        self.preprocessor = None
+        self.postprocessor = None
         self._expected_image_shapes = self._get_expected_image_shapes()
         self._expected_state_dim = self._get_expected_state_dim()
         bundle = self._capture_policy_bundle(cfg)
@@ -94,15 +112,32 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         self._active_policy_name = policy_name
         self._restore_policy_bundle(self._policy_bundles[policy_name])
         self._reset_release_watch()
+        self._next_spatial_relation_request_ts = 0.0
 
     def _reset_release_watch(self) -> None:
         self._saw_closed_gripper = False
         self._first_release_detected = False
 
     def _handle_policy_action(self, action_vec: np.ndarray) -> None:
+        self._maybe_request_spatial_relation()
+        if self._awaiting_reset_confirmation or self._awaiting_eval_confirmation:
+            return
         if self._update_release_watch():
             return
         super()._handle_policy_action(action_vec)
+
+    def _maybe_request_spatial_relation(self) -> None:
+        now = time.monotonic()
+        if now < self._next_spatial_relation_request_ts:
+            return
+
+        self._next_spatial_relation_request_ts = (
+            now + self._spatial_relation_request_interval
+        )
+        self._request_spatial_relation_async(
+            f"{self._active_policy_name} periodic",
+            force_new=False,
+        )
 
     def _get_gripper_sensor_value(self) -> Optional[float]:
         if self.gripper_wrapper is None:
@@ -149,72 +184,153 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         return False
 
     def _handle_eval_release(self) -> None:
-        response = self._request_success_checker("task state")
-        self._print_success_checker_response("task state", response)
-        self._start_reset_policy()
+        self._request_spatial_relation_async(
+            "eval gripper release",
+            force_new=True,
+        )
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        message = "Eval released. Scene graph requested; eval policy continues."
+        print(message, flush=True)
+        pyzlc.info(message)
+        self._ui_console.log(message)
 
     def _handle_reset_release(self) -> None:
-        response = self._request_success_checker("reset state")
-        self._print_success_checker_response("reset state", response)
-        if self._reset_succeeded(response):
-            self._start_eval_policy()
-            return
+        self._request_spatial_relation_async(
+            "reset gripper release",
+            force_new=True,
+        )
+        self._awaiting_reset_confirmation = False
+        self._awaiting_eval_confirmation = False
+        message = "Reset released. Scene graph requested; reset policy continues."
+        print(message, flush=True)
+        pyzlc.info(message)
+        self._ui_console.log(message)
 
-        print("waiting for human interruption", flush=True)
-        self._ui_console.log("waiting for human interruption")
-        self._clear_policy_switch_state()
-        self._state_machine.trigger(PolicyInferenceEvent.DISCARD)
+    def _request_spatial_relation_async(
+        self,
+        reason: str,
+        force_new: bool,
+    ) -> None:
+        with self._spatial_relation_request_lock:
+            if self._spatial_relation_request_in_flight:
+                self._pending_spatial_relation_request_reason = reason
+                self._pending_spatial_relation_force_new = (
+                    self._pending_spatial_relation_force_new or force_new
+                )
+                return
 
-    def _request_success_checker(self, state_request: str) -> Any:
+            if force_new or self._spatial_relation_request_id is None:
+                safe_reason = "_".join(reason.split())
+                self._spatial_relation_request_id = (
+                    f"{self._active_policy_name}-{safe_reason}-"
+                    f"{uuid.uuid4().hex}"
+                )
+                self._spatial_relation_request_prompt = self.task
+
+            request_id = self._spatial_relation_request_id
+            prompt = self.item_prompt
+            self._spatial_relation_request_in_flight = True
+
+        thread = threading.Thread(
+            target=self._spatial_relation_request_worker,
+            args=(reason, request_id, prompt),
+            daemon=True,
+        )
+        thread.start()
+
+    def _spatial_relation_request_worker(
+        self,
+        trigger_reason: str,
+        request_id: Optional[str],
+        prompt: str,
+    ) -> None:
+        request_complete = False
+        try:
+            response = self._request_spatial_relation(
+                request_id=request_id,
+                prompt=prompt,
+            )
+            self._print_spatial_relation_response(trigger_reason, response)
+            request_complete = self._spatial_relation_response_complete(
+                response
+            )
+        finally:
+            pending_reason = None
+            pending_force_new = False
+            with self._spatial_relation_request_lock:
+                self._spatial_relation_request_in_flight = False
+                if (
+                    request_complete
+                    and request_id == self._spatial_relation_request_id
+                ):
+                    self._spatial_relation_request_id = None
+                    self._spatial_relation_request_prompt = None
+                pending_reason = self._pending_spatial_relation_request_reason
+                pending_force_new = self._pending_spatial_relation_force_new
+                self._pending_spatial_relation_request_reason = None
+                self._pending_spatial_relation_force_new = False
+
+            if pending_reason is not None:
+                self._request_spatial_relation_async(
+                    pending_reason,
+                    force_new=pending_force_new,
+                )
+
+    def _request_spatial_relation(
+        self,
+        request_id: Optional[str],
+        prompt: str,
+    ) -> Any:
+        if request_id is None:
+            return {
+                "success": False,
+                "message": "missing scene graph request_id",
+            }
+
         request = {
-            "state": state_request,
-            "wait_for_new_frame": True,
-            "frame_timeout": self._success_checker_frame_timeout,
+            "request_id": request_id,
+            "prompt": prompt,
         }
-        request_fn = getattr(pyzlc, "call", None) or getattr(pyzlc, "zlc_request")
+        request_fn = getattr(pyzlc, "call", None) or getattr(
+            pyzlc, "zlc_request"
+        )
         try:
             return request_fn(
-                self._success_checker_service_name,
+                self._spatial_relation_service_name,
                 request,
-                timeout=self._success_checker_request_timeout,
-                group_name=self._success_checker_group_name,
+                timeout=self._spatial_relation_request_timeout,
+                group_name=self._pyzlc_group_name,
             )
         except Exception as exc:
             return {
                 "success": False,
-                "state": "",
+                "request_id": request["request_id"],
                 "message": str(exc),
             }
 
-    def _print_success_checker_response(self, state_request: str, response: Any) -> None:
+    def _spatial_relation_response_complete(self, response: Any) -> bool:
+        if response is None:
+            return True
+        if not isinstance(response, dict):
+            return True
+        if response.get("scene_graph_complete"):
+            return True
+        if response.get("success") is False:
+            return True
+        return False
+
+    def _print_spatial_relation_response(
+        self,
+        reason: str,
+        response: Any,
+    ) -> None:
         response_text = pprint.pformat(response)
         message = (
-            f"{self._success_checker_service_name} {state_request} response:\n"
+            f"{self._spatial_relation_service_name} {reason} response:\n"
             f"{response_text}"
         )
-        print(message, flush=True)
         pyzlc.info(message)
-
-    def _reset_succeeded(self, response: Any) -> bool:
-        texts = []
-        if isinstance(response, dict):
-            for key in ("state", "raw_response", "message"):
-                value = response.get(key)
-                if value is not None:
-                    texts.append(str(value))
-        texts.append(str(response))
-
-        for text in texts:
-            normalized = text.strip().lower()
-            if "failed" in normalized or "failure" in normalized:
-                continue
-            if normalized == "reset success":
-                return True
-            if "the reset succeeded" in normalized:
-                return True
-            if "reset succeeded" in normalized or "reset success" in normalized:
-                return True
-        return False
 
     def _handle_custom_keypress(self, key: str) -> bool:
         if key == "d" and self._state_machine.state == PolicyInferenceState.INFERING:
@@ -247,7 +363,15 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
         self._clear_policy_switch_state()
         super()._discard_infering()
 
+    def _infer_step(self) -> Optional[bool]:
+        if self._awaiting_reset_confirmation or self._awaiting_eval_confirmation:
+            self._maybe_request_spatial_relation()
+            time.sleep(0.05)
+            return False
+        return super()._infer_step()
+
     def _start_reset_policy(self) -> None:
+        pyzlc.sleep(2.0)  # brief pause before starting reset policy
         self._awaiting_reset_confirmation = False
         self._stop_infering()
         self._reset_arm()
@@ -256,7 +380,9 @@ class VLAResetLeRobotInference(MQ3TrajVisualLeRobotInference):
 
     def _start_eval_policy(self) -> None:
         self._awaiting_eval_confirmation = False
+        pyzlc.sleep(2.0)  # brief pause before starting eval policy
         self._stop_infering()
+
         self._reset_arm()
         self._next_start_policy_name = "eval"
         self._start_infering()

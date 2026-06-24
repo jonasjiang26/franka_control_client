@@ -167,3 +167,7 @@ class MQ3TrajVisualLeRobotInference(LeRobotPolicyInference):
     def _reset_arm(self):
         self.control_pair.reset_action()
         return super()._reset_arm()
+    
+    def _lift_arm(self):
+        self.control_pair.reset_action()
+        return super()._lift_arm()
